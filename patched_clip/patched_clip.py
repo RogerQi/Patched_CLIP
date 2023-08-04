@@ -145,9 +145,16 @@ def save_clip_embeddings(dataset_path: str) -> str:
       glob: "**/*.png"
     """, ".charts.yml", True, True)
 
-    source_dir = get_source_dir(dataset_path)
-    images, image_paths = load_images(source_dir, minimum_images=2)
-    logger.print(f"Loaded {len(images)} images from {source_dir}")
+    if isinstance(dataset_path, str):
+        source_dir = get_source_dir(dataset_path)
+        images, image_paths = load_images(source_dir, minimum_images=2)
+        logger.print(f"Loaded {len(images)} images from {source_dir}")
+    elif isinstance(dataset_path, list):
+        image_paths = dataset_path
+        images = [Image.open(image_path) for image_path in image_paths]
+        dataset_path = './'
+        logger.print(f"Loaded {len(images)} images from list")
+
     logger.print(f"Image resolution is {images[0].size}")
 
     # Create the feature directory if it doesn't exist
