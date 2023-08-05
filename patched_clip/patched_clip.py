@@ -15,10 +15,10 @@ from params_proto import PrefixProto, Proto
 from PIL import Image
 from torchvision.transforms import CenterCrop, Compose
 
-from patched_clip.modified_clip import clip
-from patched_clip.modified_clip.model import CLIP
-from patched_clip.utils import get_source_dir, load_images
-from patched_clip.utils import visualize_embedding_pca
+from .modified_clip import clip
+from .modified_clip.model import CLIP
+from .utils import get_source_dir, load_images
+from .utils import visualize_embedding_pca
 
 # fmt: off
 class CLIP_args(PrefixProto):

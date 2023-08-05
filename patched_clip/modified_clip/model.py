@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from patched_clip.modified_clip.interpolate import interpolate_positional_embedding
+from .interpolate import interpolate_positional_embedding
 
 class Bottleneck(nn.Module):
     expansion = 4
