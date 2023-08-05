@@ -5,10 +5,11 @@ import gc
 import os
 import time
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from einops import rearrange
 from params_proto import PrefixProto, Proto
 from PIL import Image
@@ -68,7 +69,8 @@ def patch_clip_preprocess(preprocess):
     return preprocess
 
 @torch.no_grad()
-def get_clip_embeddings(images: List[Image.Image], model: CLIP = None, preprocess: Compose = None, to_cpu: bool = True,
+def get_clip_embeddings(images: Union[List[Image.Image], List[torch.Tensor]],
+                        model: CLIP = None, preprocess: Compose = None, to_cpu: bool = True,
                         skip_center_crop: bool = False) -> torch.Tensor:
     """
     Process a list of images and get their patch embeddings with CLIP.
@@ -79,16 +81,55 @@ def get_clip_embeddings(images: List[Image.Image], model: CLIP = None, preproces
     if model is None or preprocess is None:
         with logger.time("load_clip_model"):
             model, preprocess = load_clip()
-
-    # TODO: support arbitrary user specified image sizes? Rather than the resize in the preprocess
-    if skip_center_crop:
-        preprocess = patch_clip_preprocess(preprocess)
-
-    # Preprocess each image
+    
     start_time = time.perf_counter()
-    with logger.time("clip_preprocess_images"):
-        preprocessed_images = torch.stack([preprocess(image) for image in images])
-        preprocessed_images = preprocessed_images.to(CLIP_args.device)  # (b, 3, 336, 336)
+
+    if isinstance(images[0], Image.Image):
+        # TODO: support arbitrary user specified image sizes? Rather than the resize in the preprocess
+        if skip_center_crop:
+            preprocess = patch_clip_preprocess(preprocess)
+
+        # Preprocess each image
+        with logger.time("clip_preprocess_images"):
+            preprocessed_images = torch.stack([preprocess(image) for image in images])
+            # (b, 3, H, W); usually H is the short edge and resized to 336
+            # if skip_center_crop is set to True, then the aspect ratio is preserved (i.e., W can be larger than H=336)
+            # otherwise, the image is center cropped to 336x336
+            preprocessed_images = preprocessed_images.to(CLIP_args.device)
+    else:
+        assert isinstance(images, list)
+        # Assume images is a list of CHW tensors normalized to 0-1 in RGB order
+        for batch_idx in range(len(images)):
+            # sanity check
+            assert isinstance(images[batch_idx], torch.Tensor)
+            assert images[batch_idx].shape[0] == 3
+            assert images[batch_idx].max() <= 1.0
+            assert images[batch_idx].min() >= 0.0
+
+            # resize images
+            if skip_center_crop:
+                # TODO(roger): support portrait images
+                assert images[batch_idx].shape[-1] >= images[batch_idx].shape[-2], "W should be larger than H"
+                aspect_ratio = images[batch_idx].shape[-1] / images[batch_idx].shape[-2]
+                target_H = 336
+                target_W = int(target_H * aspect_ratio)
+                images[batch_idx] = F.interpolate(images[batch_idx].unsqueeze(0),
+                                                  size=(target_H, target_W),
+                                                  mode='bilinear',
+                                                  align_corners=False).squeeze(0)
+            else:
+                assert images[batch_idx].shape[-1] == images[batch_idx].shape[-2]
+                target_H, target_W = (336, 336)
+                images[batch_idx] = F.interpolate(images[batch_idx].unsqueeze(0),
+                                                    size=(target_H, target_W),
+                                                    mode='bilinear',
+                                                    align_corners=False).squeeze(0)
+        preprocessed_images = torch.stack(images)
+        preprocessed_images = preprocessed_images.to(CLIP_args.device)
+        # normalize
+        rgb_mean = torch.tensor((0.48145466, 0.4578275, 0.40821073)).reshape(1, 3, 1, 1).to(preprocessed_images.device)
+        rgb_std  = torch.tensor((0.26862954, 0.26130258, 0.27577711)).reshape(1, 3, 1, 1).to(preprocessed_images.device)
+        preprocessed_images = (preprocessed_images - rgb_mean) / rgb_std
 
     # Get CLIP embeddings for the images
     with logger.time("get_clip_embeddings"):
@@ -128,7 +169,7 @@ def get_clip_embeddings(images: List[Image.Image], model: CLIP = None, preproces
     return embeddings
 
 
-def save_clip_embeddings(dataset_path: str) -> str:
+def save_clip_embeddings(dataset_path: Union[str, List]) -> str:
     """
     Write CLIP embeddings for images in the given dataset and return the path
     to the embeddings pickle.
