@@ -132,12 +132,12 @@ def get_clip_embeddings(images: Union[List[Image.Image], List[torch.Tensor]],
         preprocessed_images = (preprocessed_images - rgb_mean) / rgb_std
 
     # Get CLIP embeddings for the images
-    with logger.time("get_clip_embeddings"):
-        patch_embeddings = []
-        for i in range(0, len(images), CLIP_args.batch_size):
-            batch = preprocessed_images[i: i + CLIP_args.batch_size]
-            patch_embeddings.append(model.get_patch_encodings(batch))
-        patch_embeddings = torch.cat(patch_embeddings, dim=0)
+    # with logger.time("get_clip_embeddings"):
+    patch_embeddings = []
+    for i in range(0, len(images), CLIP_args.batch_size):
+        batch = preprocessed_images[i: i + CLIP_args.batch_size]
+        patch_embeddings.append(model.get_patch_encodings(batch))
+    patch_embeddings = torch.cat(patch_embeddings, dim=0)
 
     # Reshape embeddings to number of patches in height and width
     h_in, w_in = preprocessed_images.shape[-2:]
@@ -156,7 +156,7 @@ def get_clip_embeddings(images: Union[List[Image.Image], List[torch.Tensor]],
 
     end_time = time.perf_counter()
     mean_time = (end_time - start_time) / len(images)
-    logger.print("clip_process_image_mean_time:", mean_time)
+    # logger.print("clip_process_image_mean_time:", mean_time)
 
     # Delete and clear memory to be safe
     del model
