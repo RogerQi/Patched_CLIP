@@ -8,7 +8,7 @@ import numpy as np
 from einops import rearrange
 from matplotlib import pyplot as plt
 from PIL import Image
-from torchvision.transforms import Compose, Normalize
+from torchvision.transforms import Compose, Normalize, CenterCrop
 
 import torch
 from einops import rearrange
@@ -17,6 +17,14 @@ from torchtyping import TensorType
 
 _VALID_IMAGE_EXTENSIONS = "jpg jpeg png JPG JPEG PNG".split(" ")
 
+def patch_clip_preprocess(preprocess):
+    """Patch CLIP preprocess to remove center crop"""
+    # Check there is exactly one center crop transform
+    is_center_crop = [isinstance(t, CenterCrop) for t in preprocess.transforms]
+    assert sum(is_center_crop) == 1, "There should be exactly one CenterCrop transform"
+    # Create new preprocess without center crop
+    preprocess = Compose([t for t in preprocess.transforms if not isinstance(t, CenterCrop)])
+    return preprocess
 
 @torch.no_grad()
 # def get_pca(
@@ -110,6 +118,7 @@ def visualize_embedding_pca(
     alpha: float = 0.5,
     show_plot: bool = False,
     patch_size: int = 16,
+    skip_center_crop: bool = False,
 ):
     """
     Save visualized embeddings. We show the pre-processed image
@@ -121,6 +130,9 @@ def visualize_embedding_pca(
     """
     from ml_logger import logger
     from sklearn.decomposition import PCA
+
+    if skip_center_crop:
+        preprocess = patch_clip_preprocess(preprocess)
 
     # Embeddings takes in the torch format.
     embeddings = rearrange(embeddings, "n c h w -> n (h w) c")
