@@ -13,7 +13,6 @@ from torchvision.transforms import Compose, Normalize, CenterCrop
 import torch
 from einops import rearrange
 from PIL import Image
-from torchtyping import TensorType
 
 _VALID_IMAGE_EXTENSIONS = "jpg jpeg png JPG JPEG PNG".split(" ")
 
