@@ -17,8 +17,6 @@ from torchvision.transforms import CenterCrop, Compose
 
 from .modified_clip import clip
 from .modified_clip.model import CLIP
-from .utils import get_source_dir, load_images
-from .utils import visualize_embedding_pca
 
 # fmt: off
 class CLIP_args(PrefixProto):
@@ -69,18 +67,50 @@ def patch_clip_preprocess(preprocess):
     return preprocess
 
 @torch.no_grad()
+def get_clip_embeddings_export(images: Union[List[Image.Image], List[torch.Tensor]],
+                        model: CLIP = None, preprocess: Compose = None, to_cpu: bool = True,
+                        skip_center_crop: bool = False) -> torch.Tensor:
+    """
+    Process a list of images and get their patch embeddings with CLIP.
+    """
+    batch_idx = 0
+    aspect_ratio = images[batch_idx].shape[-1] / images[batch_idx].shape[-2]
+    target_H = 336
+    target_W = int(target_H * aspect_ratio)
+    images[batch_idx] = F.interpolate(images[batch_idx].unsqueeze(0),
+                                        size=(target_H, target_W),
+                                        mode='bilinear',
+                                        align_corners=False).squeeze(0)
+    preprocessed_images = torch.stack(images)
+    preprocessed_images = preprocessed_images.to('cuda')
+    # normalize
+    rgb_mean = torch.tensor((0.48145466, 0.4578275, 0.40821073)).reshape(1, 3, 1, 1).to('cuda')
+    rgb_std  = torch.tensor((0.26862954, 0.26130258, 0.27577711)).reshape(1, 3, 1, 1).to('cuda')
+    preprocessed_images = (preprocessed_images - rgb_mean) / rgb_std
+
+    # Get CLIP embeddings for the images
+    patch_embeddings = model.get_patch_encodings(preprocessed_images)
+
+    # Reshape embeddings to number of patches in height and width
+    h_in, w_in = preprocessed_images.shape[-2:]
+    h_out = h_in // model.visual.patch_size
+    w_out = w_in // model.visual.patch_size
+    embeddings = rearrange(patch_embeddings, "b (h w) d -> b d h w", h=h_out, w=w_out)
+    
+    return embeddings
+
+@torch.no_grad()
 def get_clip_embeddings(images: Union[List[Image.Image], List[torch.Tensor]],
                         model: CLIP = None, preprocess: Compose = None, to_cpu: bool = True,
                         skip_center_crop: bool = False) -> torch.Tensor:
     """
     Process a list of images and get their patch embeddings with CLIP.
     """
-    from ml_logger import logger
+    assert CLIP_args.clip_model_name.startswith("ViT")
 
     # Load CLIP if not provided
     if model is None or preprocess is None:
-        with logger.time("load_clip_model"):
-            model, preprocess = load_clip()
+        model, preprocess = load_clip()
     
     start_time = time.perf_counter()
 
@@ -90,12 +120,11 @@ def get_clip_embeddings(images: Union[List[Image.Image], List[torch.Tensor]],
             preprocess = patch_clip_preprocess(preprocess)
 
         # Preprocess each image
-        with logger.time("clip_preprocess_images"):
-            preprocessed_images = torch.stack([preprocess(image) for image in images])
-            # (b, 3, H, W); usually H is the short edge and resized to 336
-            # if skip_center_crop is set to True, then the aspect ratio is preserved (i.e., W can be larger than H=336)
-            # otherwise, the image is center cropped to 336x336
-            preprocessed_images = preprocessed_images.to(CLIP_args.device)
+        preprocessed_images = torch.stack([preprocess(image) for image in images])
+        # (b, 3, H, W); usually H is the short edge and resized to 336
+        # if skip_center_crop is set to True, then the aspect ratio is preserved (i.e., W can be larger than H=336)
+        # otherwise, the image is center cropped to 336x336
+        preprocessed_images = preprocessed_images.to(CLIP_args.device)
     else:
         assert isinstance(images, list)
         # Assume images is a list of CHW tensors normalized to 0-1 in RGB order
@@ -109,9 +138,9 @@ def get_clip_embeddings(images: Union[List[Image.Image], List[torch.Tensor]],
             # resize images
             if skip_center_crop:
                 # TODO(roger): support portrait images
-                assert images[batch_idx].shape[-1] >= images[batch_idx].shape[-2], "W should be larger than H"
+                # assert images[batch_idx].shape[-1] >= images[batch_idx].shape[-2], "W should be larger than H"
                 aspect_ratio = images[batch_idx].shape[-1] / images[batch_idx].shape[-2]
-                target_H = 336
+                target_H = 336 // 2
                 target_W = int(target_H * aspect_ratio)
                 images[batch_idx] = F.interpolate(images[batch_idx].unsqueeze(0),
                                                   size=(target_H, target_W),
@@ -132,7 +161,6 @@ def get_clip_embeddings(images: Union[List[Image.Image], List[torch.Tensor]],
         preprocessed_images = (preprocessed_images - rgb_mean) / rgb_std
 
     # Get CLIP embeddings for the images
-    # with logger.time("get_clip_embeddings"):
     patch_embeddings = []
     for i in range(0, len(images), CLIP_args.batch_size):
         batch = preprocessed_images[i: i + CLIP_args.batch_size]
@@ -141,92 +169,13 @@ def get_clip_embeddings(images: Union[List[Image.Image], List[torch.Tensor]],
 
     # Reshape embeddings to number of patches in height and width
     h_in, w_in = preprocessed_images.shape[-2:]
-    if CLIP_args.clip_model_name.startswith("ViT"):
-        h_out = h_in // model.visual.patch_size
-        w_out = w_in // model.visual.patch_size
-    elif CLIP_args.clip_model_name.startswith("RN"):
-        h_out = max(h_in / w_in, 1.0) * model.visual.attnpool.spacial_dim
-        w_out = max(w_in / h_in, 1.0) * model.visual.attnpool.spacial_dim
-        h_out, w_out = int(h_out), int(w_out)
-    else:
-        raise ValueError(f"Unknown model name {CLIP_args.clip_model_name}")
+    h_out = h_in // model.visual.patch_size
+    w_out = w_in // model.visual.patch_size
     embeddings = rearrange(patch_embeddings, "b (h w) d -> b d h w", h=h_out, w=w_out)
     if to_cpu:
         embeddings = embeddings.cpu()
 
     end_time = time.perf_counter()
     mean_time = (end_time - start_time) / len(images)
-    # logger.print("clip_process_image_mean_time:", mean_time)
-
-    # Delete and clear memory to be safe
-    del model
-    del preprocess
-    del preprocessed_images
-    del patch_embeddings
-    torch.cuda.empty_cache()
-    gc.collect()
     
     return embeddings
-
-
-def save_clip_embeddings(dataset_path: Union[str, List]) -> str:
-    """
-    Write CLIP embeddings for images in the given dataset and return the path
-    to the embeddings pickle.
-
-    In addition, save the projection matrix of the image embedder (i.e., the
-    visual transformer) in CLIP.
-    """
-    from ml_logger import logger
-
-    logger.log_params(CLIP_args=vars(CLIP_args))
-    logger.log_text("""
-    charts:
-    - type: image
-      glob: "**/*.png"
-    """, ".charts.yml", True, True)
-
-    if isinstance(dataset_path, str):
-        source_dir = get_source_dir(dataset_path)
-        images, image_paths = load_images(source_dir, minimum_images=2)
-        logger.print(f"Loaded {len(images)} images from {source_dir}")
-    elif isinstance(dataset_path, list):
-        image_paths = dataset_path
-        images = [Image.open(image_path) for image_path in image_paths]
-        dataset_path = './'
-        logger.print(f"Loaded {len(images)} images from list")
-
-    logger.print(f"Image resolution is {images[0].size}")
-
-    # Create the feature directory if it doesn't exist
-    feature_dir = os.path.join(dataset_path, CLIP_args.feature_dir)
-    os.makedirs(feature_dir, exist_ok=True)
-
-    # Load the images from disk and get the CLIP embeddings
-    embeddings = get_clip_embeddings(images).numpy()
-    logger.print(f"embedding shape = {embeddings.shape}")
-
-    # Write embeddings to disk
-    with logger.time("write_clip_embeddings"):
-        embeddings_fname = os.path.join(feature_dir, "clip.npy")
-        np.save(embeddings_fname, embeddings)
-    logger.print(f"Wrote CLIP embeddings to {embeddings_fname}")
-
-    # Visualize embeddings for debug purposes
-    if CLIP_args.visualize_embeddings:
-        with logger.time("visualize_clip_embeddings"):
-            visualize_embedding_pca(
-                image_paths,
-                images,
-                embeddings,
-                preprocess=load_clip()[1],
-                visualize_every=CLIP_args.visualize_every,
-                patch_size=CLIP_args.patch_size,
-            )
-
-    # Write projection matrix to disk
-    clip_projection_matrix = get_clip_projection_matrix()
-    projection_fname = os.path.join(feature_dir, "clip_proj.npy")
-    np.save(projection_fname, clip_projection_matrix)
-    logger.print(f"Wrote CLIP projection matrix to {projection_fname}")
-    return embeddings_fname
